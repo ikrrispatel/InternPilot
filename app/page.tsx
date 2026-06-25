@@ -4,6 +4,13 @@ import { ChangeEvent, FormEvent, useMemo, useState } from "react";
 
 type OutputKey = "resume" | "coverLetter" | "outreachEmail";
 
+type ExtractionStatus = "idle" | "loading" | "success" | "error";
+
+type ResumeExtractionResult = {
+  pageCount: number;
+  text: string;
+};
+
 type Draft = {
   key: OutputKey;
   title: string;
@@ -38,6 +45,112 @@ const initialSelections: Record<OutputKey, boolean> = {
   coverLetter: true,
   outreachEmail: true,
 };
+
+function isPdfTextItem(item: unknown): item is { hasEOL: boolean; str: string } {
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    "str" in item &&
+    typeof item.str === "string" &&
+    "hasEOL" in item &&
+    typeof item.hasEOL === "boolean"
+  );
+}
+
+function isTextContentChunk(chunk: unknown): chunk is { items: unknown[] } {
+  return (
+    typeof chunk === "object" &&
+    chunk !== null &&
+    "items" in chunk &&
+    Array.isArray(chunk.items)
+  );
+}
+
+async function readPageTextItems(page: {
+  streamTextContent: () => ReadableStream<unknown>;
+}) {
+  const stream = page.streamTextContent();
+  const reader = stream.getReader();
+  const items: unknown[] = [];
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      if (isTextContentChunk(value)) {
+        items.push(...value.items);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return items;
+}
+
+function getFriendlyExtractionError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return "PDF extraction failed. Try exporting the resume as a text-based PDF and upload it again.";
+  }
+
+  const message = error.message || "Unknown PDF extraction error.";
+
+  if (message.toLowerCase().includes("password")) {
+    return "This PDF appears to be password-protected. Upload an unlocked resume PDF.";
+  }
+
+  if (message.toLowerCase().includes("invalid pdf")) {
+    return "This file could not be read as a valid PDF. Try re-exporting the resume as a PDF and upload it again.";
+  }
+
+  return `PDF extraction failed: ${message}`;
+}
+
+async function extractTextFromPdf(file: File): Promise<ResumeExtractionResult> {
+  const pdfjs = await import("pdfjs-dist/legacy/webpack.mjs");
+  const fileBuffer = await file.arrayBuffer();
+  const pdfData = new Uint8Array(fileBuffer);
+  const loadingTask = pdfjs.getDocument({
+    data: pdfData,
+    disableAutoFetch: true,
+    disableRange: true,
+    disableStream: true,
+  });
+  const pdfDocument = await loadingTask.promise;
+  const pages: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+    const page = await pdfDocument.getPage(pageNumber);
+    const textItems = await readPageTextItems(page);
+    const pageText = textItems
+      .map((item) => {
+        if (!isPdfTextItem(item)) {
+          return "";
+        }
+
+        return item.hasEOL ? `${item.str}\n` : item.str;
+      })
+      .join(" ")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n[ \t]+/g, "\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+
+    if (pageText) {
+      pages.push(pageText);
+    }
+  }
+
+  await pdfDocument.destroy();
+  return {
+    pageCount: pdfDocument.numPages,
+    text: pages.join("\n\n").trim(),
+  };
+}
 
 function firstMeaningfulLine(text: string) {
   return text
@@ -83,11 +196,18 @@ export default function Home() {
   const [editInstructions, setEditInstructions] = useState("");
   const [hasGenerated, setHasGenerated] = useState(false);
   const [revision, setRevision] = useState(1);
+  const [resumeText, setResumeText] = useState("");
+  const [resumePageCount, setResumePageCount] = useState(0);
+  const [resumeExtractionStatus, setResumeExtractionStatus] =
+    useState<ExtractionStatus>("idle");
+  const [resumeExtractionError, setResumeExtractionError] = useState("");
 
   const selectedCount = Object.values(selectedOutputs).filter(Boolean).length;
   const canGenerate = Boolean(resumeFile) && jobDescription.trim().length > 0 && selectedCount > 0;
   const roleSignal = firstMeaningfulLine(jobDescription) ?? "Role from pasted job description";
   const companySignal = companyFromUrl(companyUrl);
+  const resumeTextPreview =
+    resumeText.length > 1200 ? `${resumeText.slice(0, 1200).trim()}...` : resumeText;
 
   const drafts = useMemo<Draft[]>(() => {
     if (!hasGenerated) {
@@ -140,10 +260,45 @@ export default function Home() {
     selectedOutputs,
   ]);
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     setResumeFile(file);
     setHasGenerated(false);
+    setResumeText("");
+    setResumePageCount(0);
+    setResumeExtractionError("");
+
+    if (!file) {
+      setResumeExtractionStatus("idle");
+      return;
+    }
+
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setResumeExtractionStatus("error");
+      setResumeExtractionError("Please upload a PDF resume file.");
+      return;
+    }
+
+    setResumeExtractionStatus("loading");
+
+    try {
+      const extraction = await extractTextFromPdf(file);
+
+      if (!extraction.text) {
+        setResumeExtractionStatus("error");
+        setResumeExtractionError(
+          "The PDF loaded, but no readable text was found. Try a text-based PDF instead of a scanned image."
+        );
+        return;
+      }
+
+      setResumeText(extraction.text);
+      setResumePageCount(extraction.pageCount);
+      setResumeExtractionStatus("success");
+    } catch (error) {
+      setResumeExtractionStatus("error");
+      setResumeExtractionError(getFriendlyExtractionError(error));
+    }
   }
 
   function handleOutputChange(key: OutputKey) {
@@ -186,7 +341,7 @@ export default function Home() {
             </h1>
           </div>
           <div className="max-w-xl rounded border border-[#d9d2c1] bg-white px-4 py-3 text-sm text-[#4f5d58]">
-            Milestone 1 mock UI. No AI, PDF parsing, database, or networked document generation is connected.
+            Milestone 2 adds local PDF text extraction. No AI, database, auth, or networked document generation is connected.
           </div>
         </header>
 
@@ -217,6 +372,64 @@ export default function Home() {
                   <span className="text-sm text-[#6f7873]">PDF only for this MVP.</span>
                 )}
               </label>
+
+              {resumeExtractionStatus !== "idle" ? (
+                <div className="rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <h3 className="text-sm font-semibold text-[#26302d]">
+                      Extracted resume text
+                    </h3>
+                    {resumeExtractionStatus === "loading" ? (
+                      <span className="w-fit rounded bg-[#fff1e8] px-2 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-[#8f431d]">
+                        Extracting
+                      </span>
+                    ) : null}
+                    {resumeExtractionStatus === "success" ? (
+                      <span className="w-fit rounded bg-[#e3f0ec] px-2 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-[#2b6f63]">
+                        {resumePageCount.toLocaleString()} {resumePageCount === 1 ? "page" : "pages"} |{" "}
+                        {resumeText.length.toLocaleString()} chars
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {resumeExtractionStatus === "loading" ? (
+                    <p className="mt-3 text-sm text-[#5f6a65]">
+                      Reading text from the uploaded PDF...
+                    </p>
+                  ) : null}
+
+                  {resumeExtractionStatus === "error" ? (
+                    <p className="mt-3 rounded border border-[#e2b79d] bg-white px-3 py-2 text-sm text-[#8f431d]">
+                      {resumeExtractionError}
+                    </p>
+                  ) : null}
+
+                  {resumeExtractionStatus === "success" ? (
+                    <div className="mt-3">
+                      <p className="text-sm font-semibold text-[#26302d]">
+                        Text preview
+                      </p>
+                      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
+                        {resumeTextPreview}
+                      </pre>
+                      {resumeText.length > resumeTextPreview.length ? (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-sm font-semibold text-[#2b6f63]">
+                            View full extracted text
+                          </summary>
+                          <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
+                            {resumeText}
+                          </pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  <p className="mt-3 text-xs leading-5 text-[#6f7873]">
+                    This text is the source-of-truth preview for future tailoring. InternPilot should not add facts that are not supported by the uploaded resume.
+                  </p>
+                </div>
+              ) : null}
 
               <label className="flex flex-col gap-2">
                 <span className="text-sm font-semibold text-[#26302d]">Job description</span>
