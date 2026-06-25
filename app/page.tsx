@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useMemo, useState } from "react";
+import { analyzeResumeJobFit } from "./match-analysis";
 
 type OutputKey = "resume" | "coverLetter" | "outreachEmail";
 
@@ -203,11 +204,27 @@ export default function Home() {
   const [resumeExtractionError, setResumeExtractionError] = useState("");
 
   const selectedCount = Object.values(selectedOutputs).filter(Boolean).length;
-  const canGenerate = Boolean(resumeFile) && jobDescription.trim().length > 0 && selectedCount > 0;
+  const hasResumeFile = Boolean(resumeFile);
+  const hasJobDescription = jobDescription.trim().length > 0;
+  const canGenerate = hasResumeFile && hasJobDescription && selectedCount > 0;
   const roleSignal = firstMeaningfulLine(jobDescription) ?? "Role from pasted job description";
   const companySignal = companyFromUrl(companyUrl);
   const resumeTextPreview =
     resumeText.length > 1200 ? `${resumeText.slice(0, 1200).trim()}...` : resumeText;
+
+  const analysisState = !hasResumeFile
+    ? "idle"
+    : resumeExtractionStatus === "loading"
+      ? "loading"
+      : resumeExtractionStatus === "error"
+        ? "error"
+        : hasJobDescription && resumeText.trim().length > 0
+          ? "ready"
+          : "idle";
+
+  const matchAnalysis = useMemo(() => {
+    return analyzeResumeJobFit(resumeText, jobDescription);
+  }, [jobDescription, resumeText]);
 
   const drafts = useMemo<Draft[]>(() => {
     if (!hasGenerated) {
@@ -341,7 +358,7 @@ export default function Home() {
             </h1>
           </div>
           <div className="max-w-xl rounded border border-[#d9d2c1] bg-white px-4 py-3 text-sm text-[#4f5d58]">
-            Milestone 2 adds local PDF text extraction. No AI, database, auth, or networked document generation is connected.
+            Milestone 3 adds a local resume/JD match analysis panel. No AI, database, auth, or networked document generation is connected.
           </div>
         </header>
 
@@ -457,6 +474,110 @@ export default function Home() {
                   value={companyUrl}
                 />
               </label>
+            </section>
+
+            <section className="flex flex-col gap-3 border-t border-[#ece6d8] pt-5">
+              <div className="flex flex-col gap-2">
+                <h2 className="text-lg font-semibold text-[#17211f]">Resume / JD match analysis</h2>
+                <p className="text-sm text-[#5a655f]">
+                  A local, deterministic review of the extracted resume text against the pasted job description.
+                </p>
+              </div>
+
+              <div className="rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
+                {analysisState === "loading" ? (
+                  <div className="rounded border border-[#d9d2c1] bg-white p-4 text-sm text-[#4f5d58]">
+                    Extracting resume text...
+                  </div>
+                ) : null}
+
+                {analysisState === "error" ? (
+                  <div className="rounded border border-[#e2b79d] bg-white p-4 text-sm text-[#8f431d]">
+                    Analysis unavailable because extracted text could not be read from the resume PDF.
+                  </div>
+                ) : null}
+
+                {analysisState === "ready" ? (
+                  <>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-[#26302d]">Fit label</p>
+                        <p className="text-xl font-semibold text-[#17211f]">{matchAnalysis.fitLabel}</p>
+                      </div>
+                      <div className="rounded bg-white px-3 py-2 text-sm text-[#4f5d58]">
+                        {matchAnalysis.summary}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded border border-[#d9d2c1] bg-white p-3">
+                      <p className="text-sm font-semibold text-[#26302d]">Matched signals</p>
+                      <ul className="mt-2 space-y-2 text-sm text-[#2f3a35]">
+                        {matchAnalysis.matchedSignals.length > 0 ? (
+                          matchAnalysis.matchedSignals.map((signal) => (
+                            <li className="rounded border border-[#dce9e4] bg-[#f4fbf8] px-3 py-2" key={signal.id}>
+                              <div className="font-semibold text-[#17211f]">{signal.label}</div>
+                              {signal.evidence ? (
+                                <div className="mt-1 text-xs text-[#4f5d58]">Evidence: {signal.evidence}</div>
+                              ) : null}
+                            </li>
+                          ))
+                        ) : (
+                          <li className="text-[#6f7873]">No matched signals were detected yet.</li>
+                        )}
+                      </ul>
+                    </div>
+
+                    <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                      <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                        <p className="text-sm font-semibold text-[#26302d]">Missing or weak signals</p>
+                        <ul className="mt-2 space-y-2 text-sm text-[#2f3a35]">
+                          {matchAnalysis.missingOrWeakSignals.length > 0 ? (
+                            matchAnalysis.missingOrWeakSignals.map((signal) => (
+                              <li className="rounded border border-[#f1e4d8] bg-[#fffaf6] px-3 py-2" key={signal.id}>
+                                <div className="font-semibold text-[#17211f]">{signal.label}</div>
+                                <div className="mt-1 text-xs text-[#7c5a3d]">{signal.note}</div>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="text-[#6f7873]">No material gaps were flagged.</li>
+                          )}
+                        </ul>
+                      </div>
+
+                      <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                        <p className="text-sm font-semibold text-[#26302d]">Relevant resume evidence</p>
+                        <ul className="mt-2 space-y-2 text-sm text-[#2f3a35]">
+                          {matchAnalysis.relevantEvidence.length > 0 ? (
+                            matchAnalysis.relevantEvidence.map((item) => (
+                              <li className="rounded border border-[#dce9e4] bg-[#f4fbf8] px-3 py-2" key={item.label}>
+                                <div className="font-semibold text-[#17211f]">{item.label}</div>
+                                <div className="mt-1 text-xs text-[#4f5d58]">{item.evidence}</div>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="text-[#6f7873]">Resume evidence will appear once matching terms are found.</li>
+                          )}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded border border-[#e2b79d] bg-[#fff8f0] p-3">
+                      <p className="text-sm font-semibold text-[#8f431d]">Truthfulness warnings</p>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#8f431d]">
+                        {matchAnalysis.warnings.map((warning) => (
+                          <li key={warning}>{warning}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </>
+                ) : null}
+
+                {analysisState === "idle" ? (
+                  <div className="rounded border border-[#d9d2c1] bg-white p-4 text-sm text-[#4f5d58]">
+                    Upload a resume PDF and paste a job description to see a local match analysis.
+                  </div>
+                ) : null}
+              </div>
             </section>
 
             <section className="flex flex-col gap-3 border-t border-[#ece6d8] pt-5">
