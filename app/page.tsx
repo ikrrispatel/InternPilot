@@ -19,6 +19,14 @@ type Draft = {
   body: string;
 };
 
+type GeneratedDraftPayload = {
+  tailoredResume: string;
+  coverLetter: string;
+  outreachEmail: string;
+  warnings: string[];
+  fallbackUsed: boolean;
+};
+
 const outputOptions: Array<{
   key: OutputKey;
   label: string;
@@ -189,6 +197,57 @@ function downloadDraft(draft: Draft) {
   URL.revokeObjectURL(url);
 }
 
+function buildMockDrafts({
+  roleSignal,
+  companySignal,
+  revision,
+  sourceName,
+  editInstructions,
+  selectedOutputs,
+}: {
+  roleSignal: string;
+  companySignal: string;
+  revision: number;
+  sourceName: string;
+  editInstructions: string;
+  selectedOutputs: Record<OutputKey, boolean>;
+}) {
+  const instructionText = editInstructions.trim() || "No extra edit instructions provided.";
+  const commonHeader = [
+    "InternPilot Mock Draft",
+    `Source resume: ${sourceName}`,
+    `Job signal: ${roleSignal}`,
+    `Company signal: ${companySignal}`,
+    `Revision: ${revision}`,
+    "",
+    "Truthfulness rule: keep only facts that appear in the uploaded resume. Do not add jobs, dates, metrics, skills, awards, education, tools, or claims that are not already supported.",
+    "",
+  ].join("\n");
+
+  const allDrafts: Draft[] = [
+    {
+      key: "resume",
+      title: "Tailored Resume",
+      fileName: makeFileName("tailored-resume"),
+      body: `${commonHeader}SUMMARY\nRewrite the candidate's existing summary around the job description's language, while preserving only verified resume facts.\n\nEXPERIENCE\nReorder and lightly tailor existing bullets from the uploaded resume toward the role. Keep dates, employers, projects, tools, and metrics exactly supported by the source resume.\n\nSKILLS\nPrioritize matching skills already present in the resume. Omit anything that appears only in the job description.\n\nEDIT INSTRUCTIONS\n${instructionText}\n`,
+    },
+    {
+      key: "coverLetter",
+      title: "Cover Letter",
+      fileName: makeFileName("cover-letter"),
+      body: `${commonHeader}Dear Hiring Team,\n\nI am interested in the opportunity described in the pasted job description. My resume should be used as the only source of truth for specific experience, skills, education, tools, dates, and accomplishments.\n\nIn the final AI-enabled version, this letter will connect verified resume evidence to the needs of the role without inventing unsupported claims. It will stay concise, direct, and ready to edit before submission.\n\nThank you for your consideration.\n\nSincerely,\nCandidate Name\n\nEDIT INSTRUCTIONS\n${instructionText}\n`,
+    },
+    {
+      key: "outreachEmail",
+      title: "Outreach / Referral Email",
+      fileName: makeFileName("outreach-referral-email"),
+      body: `${commonHeader}Subject: Interest in ${roleSignal}\n\nHi [Name],\n\nI hope you are doing well. I am interested in the ${roleSignal} opportunity and would appreciate any guidance you might be willing to share about the role or team.\n\nI have attached my resume and would be grateful if you are open to taking a quick look. I will only represent experience and skills that are supported by my resume.\n\nBest,\nCandidate Name\n\nEDIT INSTRUCTIONS\n${instructionText}\n`,
+    },
+  ];
+
+  return allDrafts.filter((draft) => selectedOutputs[draft.key]);
+}
+
 export default function Home() {
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [jobDescription, setJobDescription] = useState("");
@@ -199,6 +258,9 @@ export default function Home() {
   const [revision, setRevision] = useState(1);
   const [resumeText, setResumeText] = useState("");
   const [resumePageCount, setResumePageCount] = useState(0);
+  const [generatedPayload, setGeneratedPayload] = useState<GeneratedDraftPayload | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationNotice, setGenerationNotice] = useState("");
   const [resumeExtractionStatus, setResumeExtractionStatus] =
     useState<ExtractionStatus>("idle");
   const [resumeExtractionError, setResumeExtractionError] = useState("");
@@ -231,44 +293,36 @@ export default function Home() {
       return [];
     }
 
-    const sourceName = resumeFile?.name ?? "Uploaded resume PDF";
-    const instructionText = editInstructions.trim() || "No extra edit instructions provided.";
-    const commonHeader = [
-      "InternPilot Mock Draft",
-      `Source resume: ${sourceName}`,
-      `Job signal: ${roleSignal}`,
-      `Company signal: ${companySignal}`,
-      `Revision: ${revision}`,
-      "",
-      "Truthfulness rule: keep only facts that appear in the uploaded resume. Do not add jobs, dates, metrics, skills, awards, education, tools, or claims that are not already supported.",
-      "",
-    ].join("\n");
+    const fallbackDrafts = buildMockDrafts({
+      roleSignal,
+      companySignal,
+      revision,
+      sourceName: resumeFile?.name ?? "Uploaded resume PDF",
+      editInstructions,
+      selectedOutputs,
+    });
 
-    const allDrafts: Draft[] = [
-      {
-        key: "resume",
-        title: "Tailored Resume",
-        fileName: makeFileName("tailored-resume"),
-        body: `${commonHeader}SUMMARY\nRewrite the candidate's existing summary around the job description's language, while preserving only verified resume facts.\n\nEXPERIENCE\nReorder and lightly tailor existing bullets from the uploaded resume toward the role. Keep dates, employers, projects, tools, and metrics exactly supported by the source resume.\n\nSKILLS\nPrioritize matching skills already present in the resume. Omit anything that appears only in the job description.\n\nEDIT INSTRUCTIONS\n${instructionText}\n`,
-      },
-      {
-        key: "coverLetter",
-        title: "Cover Letter",
-        fileName: makeFileName("cover-letter"),
-        body: `${commonHeader}Dear Hiring Team,\n\nI am interested in the opportunity described in the pasted job description. My resume should be used as the only source of truth for specific experience, skills, education, tools, dates, and accomplishments.\n\nIn the final AI-enabled version, this letter will connect verified resume evidence to the needs of the role without inventing unsupported claims. It will stay concise, direct, and ready to edit before submission.\n\nThank you for your consideration.\n\nSincerely,\nCandidate Name\n\nEDIT INSTRUCTIONS\n${instructionText}\n`,
-      },
-      {
-        key: "outreachEmail",
-        title: "Outreach / Referral Email",
-        fileName: makeFileName("outreach-referral-email"),
-        body: `${commonHeader}Subject: Interest in ${roleSignal}\n\nHi [Name],\n\nI hope you are doing well. I am interested in the ${roleSignal} opportunity and would appreciate any guidance you might be willing to share about the role or team.\n\nI have attached my resume and would be grateful if you are open to taking a quick look. I will only represent experience and skills that are supported by my resume.\n\nBest,\nCandidate Name\n\nEDIT INSTRUCTIONS\n${instructionText}\n`,
-      },
-    ];
+    if (!generatedPayload) {
+      return fallbackDrafts;
+    }
 
-    return allDrafts.filter((draft) => selectedOutputs[draft.key]);
+    const generatedByKey = {
+      resume: generatedPayload.tailoredResume,
+      coverLetter: generatedPayload.coverLetter,
+      outreachEmail: generatedPayload.outreachEmail,
+    };
+
+    return fallbackDrafts.map((draft) => {
+      const body = generatedByKey[draft.key] || draft.body;
+      return {
+        ...draft,
+        body,
+      };
+    });
   }, [
     companySignal,
     editInstructions,
+    generatedPayload,
     hasGenerated,
     jobDescription,
     resumeFile?.name,
@@ -326,23 +380,123 @@ export default function Home() {
     setHasGenerated(false);
   }
 
-  function handleGenerate(event: FormEvent<HTMLFormElement>) {
+  async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canGenerate) {
+    if (!canGenerate || isGenerating) {
       return;
     }
 
-    setRevision(1);
-    setHasGenerated(true);
+    setIsGenerating(true);
+    setGenerationNotice("");
+    setGeneratedPayload(null);
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resumeText,
+          jobDescription,
+          companyUrl,
+          selectedOutputs: {
+            tailoredResume: selectedOutputs.resume,
+            coverLetter: selectedOutputs.coverLetter,
+            outreachEmail: selectedOutputs.outreachEmail,
+          },
+          editInstructions,
+          matchAnalysis: {
+            fitLabel: matchAnalysis.fitLabel,
+            summary: matchAnalysis.summary,
+            matchedSignals: matchAnalysis.matchedSignals,
+            missingOrWeakSignals: matchAnalysis.missingOrWeakSignals,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Generation request failed.");
+      }
+
+      const payload = (await response.json()) as GeneratedDraftPayload;
+      setGeneratedPayload(payload);
+      setGenerationNotice(payload.warnings.join(" "));
+      setRevision(1);
+      setHasGenerated(true);
+    } catch {
+      setGeneratedPayload({
+        tailoredResume: "",
+        coverLetter: "",
+        outreachEmail: "",
+        warnings: ["Using fallback mock output because the generation request was unavailable."],
+        fallbackUsed: true,
+      });
+      setGenerationNotice("Using fallback mock output because the generation request was unavailable.");
+      setRevision(1);
+      setHasGenerated(true);
+    } finally {
+      setIsGenerating(false);
+    }
   }
 
-  function handleRegenerate() {
-    if (!canGenerate) {
+  async function handleRegenerate() {
+    if (!canGenerate || isGenerating) {
       return;
     }
 
-    setRevision((current) => current + 1);
-    setHasGenerated(true);
+    setIsGenerating(true);
+    setGenerationNotice("");
+    setGeneratedPayload(null);
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resumeText,
+          jobDescription,
+          companyUrl,
+          selectedOutputs: {
+            tailoredResume: selectedOutputs.resume,
+            coverLetter: selectedOutputs.coverLetter,
+            outreachEmail: selectedOutputs.outreachEmail,
+          },
+          editInstructions,
+          matchAnalysis: {
+            fitLabel: matchAnalysis.fitLabel,
+            summary: matchAnalysis.summary,
+            matchedSignals: matchAnalysis.matchedSignals,
+            missingOrWeakSignals: matchAnalysis.missingOrWeakSignals,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Generation request failed.");
+      }
+
+      const payload = (await response.json()) as GeneratedDraftPayload;
+      setGeneratedPayload(payload);
+      setGenerationNotice(payload.warnings.join(" "));
+      setRevision((current) => current + 1);
+      setHasGenerated(true);
+    } catch {
+      setGeneratedPayload({
+        tailoredResume: "",
+        coverLetter: "",
+        outreachEmail: "",
+        warnings: ["Using fallback mock output because the generation request was unavailable."],
+        fallbackUsed: true,
+      });
+      setGenerationNotice("Using fallback mock output because the generation request was unavailable.");
+      setRevision((current) => current + 1);
+      setHasGenerated(true);
+    } finally {
+      setIsGenerating(false);
+    }
   }
 
   return (
@@ -358,7 +512,7 @@ export default function Home() {
             </h1>
           </div>
           <div className="max-w-xl rounded border border-[#d9d2c1] bg-white px-4 py-3 text-sm text-[#4f5d58]">
-            Milestone 3 adds a local resume/JD match analysis panel. No AI, database, auth, or networked document generation is connected.
+            Milestone 4 uses a server-side OpenAI route to generate truthful drafts from extracted resume text, job description, and local match analysis.
           </div>
         </header>
 
@@ -649,7 +803,7 @@ export default function Home() {
               <div>
                 <h2 className="text-lg font-semibold text-[#17211f]">Preview</h2>
                 <p className="mt-1 text-sm text-[#5a655f]">
-                  Mock drafts appear here after generation.
+                  Generated drafts appear here after generation.
                 </p>
               </div>
               {hasGenerated ? (
@@ -658,6 +812,12 @@ export default function Home() {
                 </span>
               ) : null}
             </div>
+
+            {generationNotice ? (
+              <div className="mt-4 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-3 text-sm text-[#4f5d58]">
+                {generationNotice}
+              </div>
+            ) : null}
 
             {drafts.length > 0 ? (
               <div className="mt-5 grid gap-4">
