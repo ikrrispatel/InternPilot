@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useMemo, useState } from "react";
+import type { OptimizedPacketResponse } from "../lib/optimized-packet";
 import { analyzeResumeJobFit } from "./match-analysis";
 
 type OutputKey = "resume" | "coverLetter" | "outreachEmail";
@@ -259,8 +260,12 @@ export default function Home() {
   const [resumeText, setResumeText] = useState("");
   const [resumePageCount, setResumePageCount] = useState(0);
   const [generatedPayload, setGeneratedPayload] = useState<GeneratedDraftPayload | null>(null);
+  const [optimizedPacketResult, setOptimizedPacketResult] =
+    useState<OptimizedPacketResponse | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingOptimizedPacket, setIsGeneratingOptimizedPacket] = useState(false);
   const [generationNotice, setGenerationNotice] = useState("");
+  const [optimizedPacketError, setOptimizedPacketError] = useState("");
   const [resumeExtractionStatus, setResumeExtractionStatus] =
     useState<ExtractionStatus>("idle");
   const [resumeExtractionError, setResumeExtractionError] = useState("");
@@ -269,6 +274,8 @@ export default function Home() {
   const hasResumeFile = Boolean(resumeFile);
   const hasJobDescription = jobDescription.trim().length > 0;
   const canGenerate = hasResumeFile && hasJobDescription && selectedCount > 0;
+  const canGenerateOptimizedPacket =
+    resumeExtractionStatus === "success" && hasJobDescription && !isGeneratingOptimizedPacket;
   const roleSignal = firstMeaningfulLine(jobDescription) ?? "Role from pasted job description";
   const companySignal = companyFromUrl(companyUrl);
   const resumeTextPreview =
@@ -331,6 +338,11 @@ export default function Home() {
     selectedOutputs,
   ]);
 
+  function clearOptimizedPacketState() {
+    setOptimizedPacketResult(null);
+    setOptimizedPacketError("");
+  }
+
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     setResumeFile(file);
@@ -338,6 +350,7 @@ export default function Home() {
     setResumeText("");
     setResumePageCount(0);
     setResumeExtractionError("");
+    clearOptimizedPacketState();
 
     if (!file) {
       setResumeExtractionStatus("idle");
@@ -440,6 +453,51 @@ export default function Home() {
     }
   }
 
+  async function handleGenerateOptimizedPacket(event: FormEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    if (!canGenerateOptimizedPacket) {
+      return;
+    }
+
+    setIsGeneratingOptimizedPacket(true);
+    setOptimizedPacketError("");
+    setOptimizedPacketResult(null);
+
+    try {
+      const response = await fetch("/api/optimized-packet", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          resumeText,
+          jobDescription,
+          companyUrl: companyUrl || undefined,
+          editInstructions: editInstructions || undefined,
+          matchAnalysis: {
+            fitLabel: matchAnalysis.fitLabel,
+            summary: matchAnalysis.summary,
+            matchedSignals: matchAnalysis.matchedSignals,
+            missingOrWeakSignals: matchAnalysis.missingOrWeakSignals,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Optimized packet request failed.");
+      }
+
+      const payload = (await response.json()) as OptimizedPacketResponse;
+      setOptimizedPacketResult(payload);
+      setOptimizedPacketError(payload.fallbackUsed ? payload.warnings.join(" ") : "");
+    } catch {
+      setOptimizedPacketResult(null);
+      setOptimizedPacketError("Optimized packet generation was unavailable. Please try again.");
+    } finally {
+      setIsGeneratingOptimizedPacket(false);
+    }
+  }
+
   async function handleRegenerate() {
     if (!canGenerate || isGenerating) {
       return;
@@ -508,11 +566,11 @@ export default function Home() {
               InternPilot
             </p>
             <h1 className="mt-2 max-w-3xl text-3xl font-semibold text-[#17211f] sm:text-4xl">
-              Truthful job-application document generator
+              AI application packet generator
             </h1>
           </div>
           <div className="max-w-xl rounded border border-[#d9d2c1] bg-white px-4 py-3 text-sm text-[#4f5d58]">
-            Milestone 4 uses a server-side OpenAI route to generate truthful drafts from extracted resume text, job description, and local match analysis.
+            InternPilot now supports extracted-resume draft generation and a separate optimized packet flow powered by a server-side OpenAI route.
           </div>
         </header>
 
@@ -597,7 +655,7 @@ export default function Home() {
                   ) : null}
 
                   <p className="mt-3 text-xs leading-5 text-[#6f7873]">
-                    This text is the source-of-truth preview for future tailoring. InternPilot should not add facts that are not supported by the uploaded resume.
+                    This extracted text is used as the base resume input for draft generation and optimized packet generation.
                   </p>
                 </div>
               ) : null}
@@ -609,6 +667,7 @@ export default function Home() {
                   onChange={(event) => {
                     setJobDescription(event.target.value);
                     setHasGenerated(false);
+                    clearOptimizedPacketState();
                   }}
                   placeholder="Paste the job description here..."
                   value={jobDescription}
@@ -622,6 +681,7 @@ export default function Home() {
                   onChange={(event) => {
                     setCompanyUrl(event.target.value);
                     setHasGenerated(false);
+                    clearOptimizedPacketState();
                   }}
                   placeholder="https://company.com"
                   type="url"
@@ -762,11 +822,31 @@ export default function Home() {
             </section>
 
             <section className="flex flex-col gap-3 border-t border-[#ece6d8] pt-5">
+              <div className="flex flex-col gap-3 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-[#17211f]">Generate optimized application packet</h2>
+                  <p className="mt-1 text-sm text-[#5a655f]">
+                    Create a single optimized synthetic packet with a structured resume, cover letter, and outreach email.
+                  </p>
+                </div>
+                <button
+                  className="w-fit rounded bg-[#2b6f63] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#245b52] disabled:cursor-not-allowed disabled:bg-[#aeb8b2]"
+                  disabled={!canGenerateOptimizedPacket}
+                  onClick={handleGenerateOptimizedPacket}
+                  type="button"
+                >
+                  {isGeneratingOptimizedPacket ? "Generating..." : "Generate optimized packet"}
+                </button>
+              </div>
+
               <label className="flex flex-col gap-2">
                 <span className="text-sm font-semibold text-[#26302d]">Edit instructions</span>
                 <textarea
                   className="min-h-28 resize-y rounded border border-[#cfc7b6] bg-[#fbfaf7] px-3 py-3 text-sm leading-6 outline-none transition placeholder:text-[#8a918c] focus:border-[#2b6f63] focus:ring-2 focus:ring-[#2b6f63]/20"
-                  onChange={(event) => setEditInstructions(event.target.value)}
+                  onChange={(event) => {
+                    setEditInstructions(event.target.value);
+                    clearOptimizedPacketState();
+                  }}
                   placeholder="Example: Make the cover letter warmer and keep the outreach email under 120 words."
                   value={editInstructions}
                 />
@@ -816,6 +896,57 @@ export default function Home() {
             {generationNotice ? (
               <div className="mt-4 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-3 text-sm text-[#4f5d58]">
                 {generationNotice}
+              </div>
+            ) : null}
+
+            {optimizedPacketError ? (
+              <div className="mt-4 rounded border border-[#e2b79d] bg-[#fff8f0] p-3 text-sm text-[#8f431d]">
+                {optimizedPacketError}
+              </div>
+            ) : null}
+
+            {optimizedPacketResult ? (
+              <div className="mt-5 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
+                <div className="flex flex-col gap-2 border-b border-[#ece6d8] pb-3">
+                  <h3 className="text-base font-semibold text-[#17211f]">Optimized Application Packet</h3>
+                  {optimizedPacketResult.fallbackUsed ? (
+                    <p className="text-sm text-[#8f431d]">Fallback notice: the optimized packet returned a safe fallback response.</p>
+                  ) : null}
+                </div>
+                <div className="mt-4 space-y-4">
+                  <div>
+                    <h4 className="text-sm font-semibold text-[#26302d]">Research rationale</h4>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#4f5d58]">
+                      {optimizedPacketResult.researchRationale}
+                    </p>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-[#26302d]">Changed sections summary</h4>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#4f5d58]">
+                      {optimizedPacketResult.changedSectionsSummary.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-[#26302d]">Optimized resume</h4>
+                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
+                      {optimizedPacketResult.renderedResumeText}
+                    </pre>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-[#26302d]">Cover letter / CV</h4>
+                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
+                      {optimizedPacketResult.coverLetter}
+                    </pre>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-[#26302d]">Cold outreach email</h4>
+                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
+                      {optimizedPacketResult.coldOutreachEmail}
+                    </pre>
+                  </div>
+                </div>
               </div>
             ) : null}
 
