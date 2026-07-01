@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useMemo, useState } from "react";
-import type { OptimizedPacketResponse } from "../lib/optimized-packet";
+import type { ResumeGenerationMode, ResumeSystemResponse } from "../lib/resume-system";
 import { analyzeResumeJobFit } from "./match-analysis";
 
 type OutputKey = "resume" | "coverLetter" | "outreachEmail";
@@ -253,31 +253,21 @@ export default function Home() {
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [jobDescription, setJobDescription] = useState("");
   const [companyUrl, setCompanyUrl] = useState("");
-  const [selectedOutputs, setSelectedOutputs] = useState(initialSelections);
-  const [editInstructions, setEditInstructions] = useState("");
-  const [hasGenerated, setHasGenerated] = useState(false);
-  const [revision, setRevision] = useState(1);
+  const [roleTitle, setRoleTitle] = useState("");
   const [resumeText, setResumeText] = useState("");
   const [resumePageCount, setResumePageCount] = useState(0);
-  const [generatedPayload, setGeneratedPayload] = useState<GeneratedDraftPayload | null>(null);
-  const [optimizedPacketResult, setOptimizedPacketResult] =
-    useState<OptimizedPacketResponse | null>(null);
+  const [resumeSystemResult, setResumeSystemResult] = useState<ResumeSystemResponse | null>(null);
+  const [resumeSystemError, setResumeSystemError] = useState("");
+  const [mode, setMode] = useState<ResumeGenerationMode>("synthetic_test");
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isGeneratingOptimizedPacket, setIsGeneratingOptimizedPacket] = useState(false);
-  const [generationNotice, setGenerationNotice] = useState("");
-  const [optimizedPacketError, setOptimizedPacketError] = useState("");
   const [resumeExtractionStatus, setResumeExtractionStatus] =
     useState<ExtractionStatus>("idle");
   const [resumeExtractionError, setResumeExtractionError] = useState("");
 
-  const selectedCount = Object.values(selectedOutputs).filter(Boolean).length;
   const hasResumeFile = Boolean(resumeFile);
   const hasJobDescription = jobDescription.trim().length > 0;
-  const canGenerate = hasResumeFile && hasJobDescription && selectedCount > 0;
-  const canGenerateOptimizedPacket =
-    resumeExtractionStatus === "success" && hasJobDescription && !isGeneratingOptimizedPacket;
-  const roleSignal = firstMeaningfulLine(jobDescription) ?? "Role from pasted job description";
-  const companySignal = companyFromUrl(companyUrl);
+  const hasExtractedText = resumeExtractionStatus === "success" && resumeText.trim().length > 0;
+  const canGenerate = hasResumeFile && hasExtractedText && hasJobDescription && !isGenerating;
   const resumeTextPreview =
     resumeText.length > 1200 ? `${resumeText.slice(0, 1200).trim()}...` : resumeText;
 
@@ -295,62 +285,33 @@ export default function Home() {
     return analyzeResumeJobFit(resumeText, jobDescription);
   }, [jobDescription, resumeText]);
 
-  const drafts = useMemo<Draft[]>(() => {
-    if (!hasGenerated) {
-      return [];
+  function clearResumeSystemState() {
+    setResumeSystemResult(null);
+    setResumeSystemError("");
+  }
+
+  function getCompanyNameFromInput(value: string) {
+    const trimmed = value.trim();
+
+    if (!trimmed) {
+      return "";
     }
 
-    const fallbackDrafts = buildMockDrafts({
-      roleSignal,
-      companySignal,
-      revision,
-      sourceName: resumeFile?.name ?? "Uploaded resume PDF",
-      editInstructions,
-      selectedOutputs,
-    });
-
-    if (!generatedPayload) {
-      return fallbackDrafts;
+    try {
+      return new URL(trimmed).hostname.replace(/^www\./, "");
+    } catch {
+      return "";
     }
-
-    const generatedByKey = {
-      resume: generatedPayload.tailoredResume,
-      coverLetter: generatedPayload.coverLetter,
-      outreachEmail: generatedPayload.outreachEmail,
-    };
-
-    return fallbackDrafts.map((draft) => {
-      const body = generatedByKey[draft.key] || draft.body;
-      return {
-        ...draft,
-        body,
-      };
-    });
-  }, [
-    companySignal,
-    editInstructions,
-    generatedPayload,
-    hasGenerated,
-    jobDescription,
-    resumeFile?.name,
-    revision,
-    roleSignal,
-    selectedOutputs,
-  ]);
-
-  function clearOptimizedPacketState() {
-    setOptimizedPacketResult(null);
-    setOptimizedPacketError("");
   }
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     setResumeFile(file);
-    setHasGenerated(false);
     setResumeText("");
     setResumePageCount(0);
+    setResumeSystemResult(null);
+    setResumeSystemError("");
     setResumeExtractionError("");
-    clearOptimizedPacketState();
 
     if (!file) {
       setResumeExtractionStatus("idle");
@@ -385,14 +346,6 @@ export default function Home() {
     }
   }
 
-  function handleOutputChange(key: OutputKey) {
-    setSelectedOutputs((current) => ({
-      ...current,
-      [key]: !current[key],
-    }));
-    setHasGenerated(false);
-  }
-
   async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canGenerate || isGenerating) {
@@ -400,161 +353,63 @@ export default function Home() {
     }
 
     setIsGenerating(true);
-    setGenerationNotice("");
-    setGeneratedPayload(null);
+    setResumeSystemError("");
+    setResumeSystemResult(null);
 
     try {
-      const response = await fetch("/api/generate", {
+      const response = await fetch("/api/resume-system", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          resumeText,
+          baseResumeText: resumeText,
           jobDescription,
-          companyUrl,
-          selectedOutputs: {
-            tailoredResume: selectedOutputs.resume,
-            coverLetter: selectedOutputs.coverLetter,
-            outreachEmail: selectedOutputs.outreachEmail,
-          },
-          editInstructions,
-          matchAnalysis: {
-            fitLabel: matchAnalysis.fitLabel,
-            summary: matchAnalysis.summary,
-            matchedSignals: matchAnalysis.matchedSignals,
-            missingOrWeakSignals: matchAnalysis.missingOrWeakSignals,
-          },
+          companyName: getCompanyNameFromInput(companyUrl),
+          roleTitle: roleTitle.trim() || "Software Engineering Intern",
+          mode,
         }),
       });
 
       if (!response.ok) {
-        throw new Error("Generation request failed.");
+        throw new Error("Resume system request failed.");
       }
 
-      const payload = (await response.json()) as GeneratedDraftPayload;
-      setGeneratedPayload(payload);
-      setGenerationNotice(payload.warnings.join(" "));
-      setRevision(1);
-      setHasGenerated(true);
+      const payload = (await response.json()) as ResumeSystemResponse;
+      setResumeSystemResult(payload);
     } catch {
-      setGeneratedPayload({
-        tailoredResume: "",
-        coverLetter: "",
-        outreachEmail: "",
-        warnings: ["Using fallback mock output because the generation request was unavailable."],
-        fallbackUsed: true,
-      });
-      setGenerationNotice("Using fallback mock output because the generation request was unavailable.");
-      setRevision(1);
-      setHasGenerated(true);
+      setResumeSystemError("The schema-first resume request was unavailable. Please try again.");
     } finally {
       setIsGenerating(false);
     }
   }
 
-  async function handleGenerateOptimizedPacket(event: FormEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    if (!canGenerateOptimizedPacket) {
+  async function handleCopyLatex() {
+    if (!resumeSystemResult?.latex) {
       return;
     }
 
-    setIsGeneratingOptimizedPacket(true);
-    setOptimizedPacketError("");
-    setOptimizedPacketResult(null);
-
     try {
-      const response = await fetch("/api/optimized-packet", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          resumeText,
-          jobDescription,
-          companyUrl: companyUrl || undefined,
-          editInstructions: editInstructions || undefined,
-          matchAnalysis: {
-            fitLabel: matchAnalysis.fitLabel,
-            summary: matchAnalysis.summary,
-            matchedSignals: matchAnalysis.matchedSignals,
-            missingOrWeakSignals: matchAnalysis.missingOrWeakSignals,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Optimized packet request failed.");
-      }
-
-      const payload = (await response.json()) as OptimizedPacketResponse;
-      setOptimizedPacketResult(payload);
-      setOptimizedPacketError(payload.fallbackUsed ? payload.warnings.join(" ") : "");
+      await navigator.clipboard.writeText(resumeSystemResult.latex);
     } catch {
-      setOptimizedPacketResult(null);
-      setOptimizedPacketError("Optimized packet generation was unavailable. Please try again.");
-    } finally {
-      setIsGeneratingOptimizedPacket(false);
+      setResumeSystemError("The LaTeX preview could not be copied to the clipboard.");
     }
   }
 
-  async function handleRegenerate() {
-    if (!canGenerate || isGenerating) {
+  function handleDownloadLatex() {
+    if (!resumeSystemResult?.latex) {
       return;
     }
 
-    setIsGenerating(true);
-    setGenerationNotice("");
-    setGeneratedPayload(null);
-
-    try {
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          resumeText,
-          jobDescription,
-          companyUrl,
-          selectedOutputs: {
-            tailoredResume: selectedOutputs.resume,
-            coverLetter: selectedOutputs.coverLetter,
-            outreachEmail: selectedOutputs.outreachEmail,
-          },
-          editInstructions,
-          matchAnalysis: {
-            fitLabel: matchAnalysis.fitLabel,
-            summary: matchAnalysis.summary,
-            matchedSignals: matchAnalysis.matchedSignals,
-            missingOrWeakSignals: matchAnalysis.missingOrWeakSignals,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Generation request failed.");
-      }
-
-      const payload = (await response.json()) as GeneratedDraftPayload;
-      setGeneratedPayload(payload);
-      setGenerationNotice(payload.warnings.join(" "));
-      setRevision((current) => current + 1);
-      setHasGenerated(true);
-    } catch {
-      setGeneratedPayload({
-        tailoredResume: "",
-        coverLetter: "",
-        outreachEmail: "",
-        warnings: ["Using fallback mock output because the generation request was unavailable."],
-        fallbackUsed: true,
-      });
-      setGenerationNotice("Using fallback mock output because the generation request was unavailable.");
-      setRevision((current) => current + 1);
-      setHasGenerated(true);
-    } finally {
-      setIsGenerating(false);
-    }
+    const blob = new Blob([resumeSystemResult.latex], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "resume.tex";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -666,13 +521,47 @@ export default function Home() {
                   className="min-h-56 resize-y rounded border border-[#cfc7b6] bg-[#fbfaf7] px-3 py-3 text-sm leading-6 outline-none transition placeholder:text-[#8a918c] focus:border-[#2b6f63] focus:ring-2 focus:ring-[#2b6f63]/20"
                   onChange={(event) => {
                     setJobDescription(event.target.value);
-                    setHasGenerated(false);
-                    clearOptimizedPacketState();
+                    clearResumeSystemState();
                   }}
                   placeholder="Paste the job description here..."
                   value={jobDescription}
                 />
               </label>
+
+              <div className="flex flex-col gap-3 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
+                <div className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-[#26302d]">Resume generation mode</span>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    {(["real_application", "synthetic_test"] as ResumeGenerationMode[]).map((value) => {
+                      const isActive = mode === value;
+                      const label = value === "real_application" ? "Real Application" : "Synthetic Test";
+
+                      return (
+                        <button
+                          className={`rounded border px-3 py-2 text-sm font-semibold transition ${
+                            isActive
+                              ? "border-[#2b6f63] bg-[#2b6f63] text-white"
+                              : "border-[#cfc7b6] bg-white text-[#4f5d58] hover:border-[#2b6f63]"
+                          }`}
+                          key={value}
+                          onClick={() => {
+                            setMode(value);
+                            clearResumeSystemState();
+                          }}
+                          type="button"
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-sm text-[#5a655f]">
+                    {mode === "real_application"
+                      ? "Uses only resume-supported evidence. It will not invent missing skills, companies, dates, projects, or metrics."
+                      : "Internal testing mode. Can create synthetic role-aligned content for parser and JD-matching tests. Do not submit this version to employers."}
+                  </p>
+                </div>
+              </div>
 
               <label className="flex flex-col gap-2">
                 <span className="text-sm font-semibold text-[#26302d]">Company URL</span>
@@ -680,14 +569,43 @@ export default function Home() {
                   className="rounded border border-[#cfc7b6] bg-[#fbfaf7] px-3 py-3 text-sm outline-none transition placeholder:text-[#8a918c] focus:border-[#2b6f63] focus:ring-2 focus:ring-[#2b6f63]/20"
                   onChange={(event) => {
                     setCompanyUrl(event.target.value);
-                    setHasGenerated(false);
-                    clearOptimizedPacketState();
+                    clearResumeSystemState();
                   }}
                   placeholder="https://company.com"
                   type="url"
                   value={companyUrl}
                 />
               </label>
+
+              <label className="flex flex-col gap-2">
+                <span className="text-sm font-semibold text-[#26302d]">Role title</span>
+                <input
+                  className="rounded border border-[#cfc7b6] bg-[#fbfaf7] px-3 py-3 text-sm outline-none transition placeholder:text-[#8a918c] focus:border-[#2b6f63] focus:ring-2 focus:ring-[#2b6f63]/20"
+                  onChange={(event) => {
+                    setRoleTitle(event.target.value);
+                    clearResumeSystemState();
+                  }}
+                  placeholder="Software Engineering Intern"
+                  type="text"
+                  value={roleTitle}
+                />
+              </label>
+
+              <div className="flex flex-col gap-3 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-[#26302d]">Generate schema-first resume</p>
+                  <p className="mt-1 text-sm text-[#5a655f]">
+                    Sends the extracted resume and job description to the schema-first resume pipeline.
+                  </p>
+                </div>
+                <button
+                  className="w-fit rounded bg-[#2b6f63] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#245b52] disabled:cursor-not-allowed disabled:bg-[#aeb8b2]"
+                  disabled={!canGenerate}
+                  type="submit"
+                >
+                  {isGenerating ? "Generating..." : "Generate schema-first resume"}
+                </button>
+              </div>
             </section>
 
             <section className="flex flex-col gap-3 border-t border-[#ece6d8] pt-5">
@@ -775,14 +693,6 @@ export default function Home() {
                       </div>
                     </div>
 
-                    <div className="mt-4 rounded border border-[#e2b79d] bg-[#fff8f0] p-3">
-                      <p className="text-sm font-semibold text-[#8f431d]">Truthfulness warnings</p>
-                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#8f431d]">
-                        {matchAnalysis.warnings.map((warning) => (
-                          <li key={warning}>{warning}</li>
-                        ))}
-                      </ul>
-                    </div>
                   </>
                 ) : null}
 
@@ -794,88 +704,6 @@ export default function Home() {
               </div>
             </section>
 
-            <section className="flex flex-col gap-3 border-t border-[#ece6d8] pt-5">
-              <h2 className="text-lg font-semibold text-[#17211f]">Outputs</h2>
-              <div className="grid gap-3">
-                {outputOptions.map((option) => (
-                  <label
-                    className="flex cursor-pointer items-start gap-3 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-3 transition hover:border-[#2b6f63]"
-                    key={option.key}
-                  >
-                    <input
-                      checked={selectedOutputs[option.key]}
-                      className="mt-1 h-4 w-4 accent-[#2b6f63]"
-                      onChange={() => handleOutputChange(option.key)}
-                      type="checkbox"
-                    />
-                    <span>
-                      <span className="block text-sm font-semibold text-[#26302d]">
-                        {option.label}
-                      </span>
-                      <span className="mt-1 block text-sm text-[#5f6a65]">
-                        {option.description}
-                      </span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </section>
-
-            <section className="flex flex-col gap-3 border-t border-[#ece6d8] pt-5">
-              <div className="flex flex-col gap-3 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
-                <div>
-                  <h2 className="text-lg font-semibold text-[#17211f]">Generate optimized application packet</h2>
-                  <p className="mt-1 text-sm text-[#5a655f]">
-                    Create a single optimized synthetic packet with a structured resume, cover letter, and outreach email.
-                  </p>
-                </div>
-                <button
-                  className="w-fit rounded bg-[#2b6f63] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#245b52] disabled:cursor-not-allowed disabled:bg-[#aeb8b2]"
-                  disabled={!canGenerateOptimizedPacket}
-                  onClick={handleGenerateOptimizedPacket}
-                  type="button"
-                >
-                  {isGeneratingOptimizedPacket ? "Generating..." : "Generate optimized packet"}
-                </button>
-              </div>
-
-              <label className="flex flex-col gap-2">
-                <span className="text-sm font-semibold text-[#26302d]">Edit instructions</span>
-                <textarea
-                  className="min-h-28 resize-y rounded border border-[#cfc7b6] bg-[#fbfaf7] px-3 py-3 text-sm leading-6 outline-none transition placeholder:text-[#8a918c] focus:border-[#2b6f63] focus:ring-2 focus:ring-[#2b6f63]/20"
-                  onChange={(event) => {
-                    setEditInstructions(event.target.value);
-                    clearOptimizedPacketState();
-                  }}
-                  placeholder="Example: Make the cover letter warmer and keep the outreach email under 120 words."
-                  value={editInstructions}
-                />
-              </label>
-
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <button
-                  className="rounded bg-[#2b6f63] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#245b52] disabled:cursor-not-allowed disabled:bg-[#aeb8b2]"
-                  disabled={!canGenerate}
-                  type="submit"
-                >
-                  Generate
-                </button>
-                <button
-                  className="rounded border border-[#b75f2a] px-4 py-3 text-sm font-semibold text-[#8f431d] transition hover:bg-[#fff1e8] disabled:cursor-not-allowed disabled:border-[#d7c6bb] disabled:text-[#a89990]"
-                  disabled={!canGenerate}
-                  onClick={handleRegenerate}
-                  type="button"
-                >
-                  Regenerate
-                </button>
-              </div>
-
-              {!canGenerate ? (
-                <p className="text-sm text-[#8f431d]">
-                  Add a PDF, paste a job description, and select at least one output.
-                </p>
-              ) : null}
-            </section>
           </form>
 
           <section className="flex min-h-[640px] flex-col rounded border border-[#d9d2c1] bg-white p-5 shadow-sm">
@@ -883,95 +711,122 @@ export default function Home() {
               <div>
                 <h2 className="text-lg font-semibold text-[#17211f]">Preview</h2>
                 <p className="mt-1 text-sm text-[#5a655f]">
-                  Generated drafts appear here after generation.
+                  Generated resume output appears here after generation.
                 </p>
               </div>
-              {hasGenerated ? (
-                <span className="w-fit rounded bg-[#e3f0ec] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[#2b6f63]">
-                  Revision {revision}
-                </span>
-              ) : null}
             </div>
 
-            {generationNotice ? (
-              <div className="mt-4 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-3 text-sm text-[#4f5d58]">
-                {generationNotice}
-              </div>
-            ) : null}
-
-            {optimizedPacketError ? (
+            {resumeSystemError ? (
               <div className="mt-4 rounded border border-[#e2b79d] bg-[#fff8f0] p-3 text-sm text-[#8f431d]">
-                {optimizedPacketError}
+                {resumeSystemError}
               </div>
             ) : null}
 
-            {optimizedPacketResult ? (
+            {resumeSystemResult ? (
               <div className="mt-5 rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4">
-                <div className="flex flex-col gap-2 border-b border-[#ece6d8] pb-3">
-                  <h3 className="text-base font-semibold text-[#17211f]">Optimized Application Packet</h3>
-                  {optimizedPacketResult.fallbackUsed ? (
-                    <p className="text-sm text-[#8f431d]">Fallback notice: the optimized packet returned a safe fallback response.</p>
-                  ) : null}
-                </div>
-                <div className="mt-4 space-y-4">
+                <div className="flex flex-col gap-3 border-b border-[#ece6d8] pb-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
-                    <h4 className="text-sm font-semibold text-[#26302d]">Research rationale</h4>
-                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#4f5d58]">
-                      {optimizedPacketResult.researchRationale}
+                    <h3 className="text-base font-semibold text-[#17211f]">Schema-First Resume System</h3>
+                    <p className="mt-1 text-sm text-[#5a655f]">
+                      Parser-friendly resume structure generated from the schema-first engine.
                     </p>
                   </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-[#26302d]">Changed sections summary</h4>
-                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#4f5d58]">
-                      {optimizedPacketResult.changedSectionsSummary.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
+                  {resumeSystemResult.fallbackUsed ? (
+                    <span className="w-fit rounded bg-[#fff1e8] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[#8f431d]">
+                      Fallback used
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Mode</p>
+                    <p className="mt-1 text-sm text-[#4f5d58]">
+                      {resumeSystemResult.mode === "real_application" ? "Real Application" : "Synthetic Test"}
+                    </p>
                   </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-[#26302d]">Optimized resume</h4>
-                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
-                      {optimizedPacketResult.renderedResumeText}
-                    </pre>
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Fallback used</p>
+                    <p className="mt-1 text-sm text-[#4f5d58]">
+                      {resumeSystemResult.fallbackUsed ? "Yes" : "No"}
+                    </p>
                   </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-[#26302d]">Cover letter / CV</h4>
-                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
-                      {optimizedPacketResult.coverLetter}
-                    </pre>
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Human readability score</p>
+                    <p className="mt-1 text-sm text-[#4f5d58]">
+                      {resumeSystemResult.qualityReport.humanReadabilityScore}
+                    </p>
                   </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-[#26302d]">Cold outreach email</h4>
-                    <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-3 text-sm leading-6 text-[#26302d]">
-                      {optimizedPacketResult.coldOutreachEmail}
-                    </pre>
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Parser readability score</p>
+                    <p className="mt-1 text-sm text-[#4f5d58]">
+                      {resumeSystemResult.qualityReport.parserReadabilityScore}
+                    </p>
+                  </div>
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Job alignment score</p>
+                    <p className="mt-1 text-sm text-[#4f5d58]">
+                      {resumeSystemResult.qualityReport.jobAlignmentScore}
+                    </p>
+                  </div>
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Layout risk</p>
+                    <p className="mt-1 text-sm text-[#4f5d58]">
+                      {resumeSystemResult.qualityReport.layoutRisk}
+                    </p>
                   </div>
                 </div>
-              </div>
-            ) : null}
 
-            {drafts.length > 0 ? (
-              <div className="mt-5 grid gap-4">
-                {drafts.map((draft) => (
-                  <article
-                    className="rounded border border-[#d9d2c1] bg-[#fbfaf7] p-4"
-                    key={draft.key}
+                <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Issues</p>
+                    {resumeSystemResult.qualityReport.issues.length > 0 ? (
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#4f5d58]">
+                        {resumeSystemResult.qualityReport.issues.map((issue) => (
+                          <li key={issue}>{issue}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-sm text-[#4f5d58]">None reported.</p>
+                    )}
+                  </div>
+                  <div className="rounded border border-[#d9d2c1] bg-white p-3">
+                    <p className="text-sm font-semibold text-[#26302d]">Warnings</p>
+                    {resumeSystemResult.qualityReport.warnings.length > 0 ? (
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-[#4f5d58]">
+                        {resumeSystemResult.qualityReport.warnings.map((warning) => (
+                          <li key={warning}>{warning}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-sm text-[#4f5d58]">None reported.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                  <button
+                    className="rounded border border-[#2b6f63] px-3 py-2 text-sm font-semibold text-[#2b6f63] transition hover:bg-[#e3f0ec]"
+                    onClick={handleCopyLatex}
+                    type="button"
                   >
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <h3 className="text-base font-semibold text-[#17211f]">{draft.title}</h3>
-                      <button
-                        className="rounded border border-[#2b6f63] px-3 py-2 text-sm font-semibold text-[#2b6f63] transition hover:bg-[#e3f0ec]"
-                        onClick={() => downloadDraft(draft)}
-                        type="button"
-                      >
-                        Download
-                      </button>
-                    </div>
-                    <pre className="mt-4 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-white p-4 text-sm leading-6 text-[#26302d]">
-                      {draft.body}
-                    </pre>
-                  </article>
-                ))}
+                    Copy LaTeX
+                  </button>
+                  <button
+                    className="rounded border border-[#2b6f63] px-3 py-2 text-sm font-semibold text-[#2b6f63] transition hover:bg-[#e3f0ec]"
+                    onClick={handleDownloadLatex}
+                    type="button"
+                  >
+                    Download resume.tex
+                  </button>
+                </div>
+
+                <div className="mt-4">
+                  <p className="text-sm font-semibold text-[#26302d]">LaTeX preview</p>
+                  <pre className="mt-2 max-h-[32rem] overflow-auto whitespace-pre-wrap rounded bg-[#0f1720] p-4 text-sm leading-6 text-[#f8fafc]">
+                    <code>{resumeSystemResult.latex}</code>
+                  </pre>
+                </div>
               </div>
             ) : (
               <div className="grid flex-1 place-items-center py-12 text-center">
@@ -979,11 +834,9 @@ export default function Home() {
                   <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded bg-[#e3f0ec] text-lg font-bold text-[#2b6f63]">
                     IP
                   </div>
-                  <h3 className="text-lg font-semibold text-[#17211f]">Ready for a mock run</h3>
+                  <h3 className="text-lg font-semibold text-[#17211f]">Ready for a schema-first run</h3>
                   <p className="mt-2 text-sm leading-6 text-[#5a655f]">
-                    The first checkpoint proves the product flow: collect inputs,
-                    choose documents, generate previews, edit instructions, regenerate,
-                    and download text files.
+                    Upload a resume PDF, paste a job description, pick a mode, and generate a schema-first resume preview.
                   </p>
                 </div>
               </div>

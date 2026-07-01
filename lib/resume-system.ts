@@ -304,6 +304,12 @@ function hasMailtoMarkdown(value: string) {
   return /\[[^\]]+\]\(\s*mailto:[^)]+\)/i.test(value);
 }
 
+function hasDanglingSingleBackslash(value: string) {
+  return value
+    .split(/\r?\n/)
+    .some((line) => /(^|[^\\])\\$/.test(line.trim()));
+}
+
 function clampScore(value: number) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
@@ -369,6 +375,66 @@ function extractLocation(value: string) {
 
 function hasUsableContactValue(value: string, placeholder: string) {
   return Boolean(value && value.trim() && value.trim().toLowerCase() !== placeholder.toLowerCase());
+}
+
+const PLACEHOLDER_VALUES = new Set([
+  "organization",
+  "company",
+  "location not provided",
+  "phone not provided",
+  "linkedin not provided",
+  "graduation date not provided",
+  "n/a",
+  "unknown",
+]);
+
+function isPlaceholderValue(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+
+  const trimmed = value.trim().toLowerCase();
+  return trimmed === "" ? false : PLACEHOLDER_VALUES.has(trimmed);
+}
+
+function normalizePlaceholderValue(value: string | undefined) {
+  if (!value) {
+    return "";
+  }
+
+  const trimmed = value.trim();
+  return isPlaceholderValue(trimmed) ? "" : trimmed;
+}
+
+function extractGraduationDate(baseResumeText: string) {
+  const normalized = baseResumeText.replace(/\s+/g, " ").trim();
+
+  const expectedPatterns = [
+    /expected\s+(dec\.?|december)\s+(\d{4})/i,
+    /expected\s+(jan\.?|january|feb\.?|february|mar\.?|march|apr\.?|april|may|jun\.?|june|jul\.?|july|aug\.?|august|sep\.?|september|oct\.?|october|nov\.?|november|dec\.?|december)\s+(\d{4})/i,
+  ];
+
+  for (const pattern of expectedPatterns) {
+    const match = normalized.match(pattern);
+    if (match) {
+      const [, month, year] = match;
+      return `Expected ${month.charAt(0).toUpperCase()}${month.slice(1)} ${year}`;
+    }
+  }
+
+  const patterns = [
+    /(dec\.?|december)\s+(\d{4})/i,
+    /(jan\.?|january|feb\.?|february|mar\.?|march|apr\.?|april|may|jun\.?|june|jul\.?|july|aug\.?|august|sep\.?|september|oct\.?|october|nov\.?|november|dec\.?|december)\s+(\d{4})/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match) {
+      return `${match[1].charAt(0).toUpperCase()}${match[1].slice(1)} ${match[2]}`;
+    }
+  }
+
+  return undefined;
 }
 
 const SKILL_DICTIONARY: Array<{ label: string; items: string[] }> = [
@@ -544,11 +610,26 @@ export function repairOptimizedResume(
     })
     .filter((project) => project.name && project.bullets.length > 0);
 
+  const extractedGraduationDate = extractGraduationDate(baseResumeText);
+  const repairedEducation = resume.education.map((education) => {
+    const graduationDate =
+      education.graduationDate && !isPlaceholderValue(education.graduationDate)
+        ? education.graduationDate
+        : extractedGraduationDate || "";
+
+    return {
+      ...education,
+      graduationDate,
+    };
+  });
+
   const repairedExperience = resume.experience
     .slice(0, 2)
     .map((experience) => ({
       ...experience,
-      title: experience.title || "Experience",
+      title: normalizePlaceholderValue(experience.title) || "Experience",
+      organization: normalizePlaceholderValue(experience.organization),
+      location: normalizePlaceholderValue(experience.location),
       bullets: experience.bullets
         .map((bullet) => repairBullet(bullet, experience.title || "experience", request, baseResumeText))
         .filter(Boolean)
@@ -559,6 +640,7 @@ export function repairOptimizedResume(
   return {
     ...resume,
     contact: repairedContact,
+    education: repairedEducation,
     skills: repairedSkills,
     projects: repairedProjects,
     experience: repairedExperience,
@@ -634,8 +716,16 @@ export function createResumeQualityReport(
     issues.push("LaTeX contains a Role Alignment keyword dump section.");
   }
 
-  if (!resume.contact.github && /github/i.test(latex)) {
-    issues.push("GitHub appears in LaTeX even though contact.github is not present.");
+  if (!resume.contact.github && /(?:https?:\/\/)?(?:www\.)?github\.com\/[\w.-]+/i.test(latex)) {
+    issues.push("GitHub appears in LaTeX as a contact link even though contact.github is not present.");
+  }
+
+  if (hasDanglingSingleBackslash(latex)) {
+    warnings.push("LaTeX contains a likely dangling single backslash line.");
+  }
+
+  if (/Organization|Company|Location not provided|Phone not provided|LinkedIn not provided|Graduation date not provided|N\/A|Unknown/i.test(latex)) {
+    warnings.push("LaTeX still contains placeholder content.");
   }
 
   if (resume.projects.length === 0) {

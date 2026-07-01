@@ -33,8 +33,39 @@ const LATEX_SPECIAL_CHARACTERS: Record<string, string> = {
   "^": "\\textasciicircum{}",
 };
 
+const LATEX_LINE_BREAK = "\\\\";
+
 export function escapeLatex(value: string): string {
   return value.replace(/[\\&%$#_{}~^]/g, (character) => LATEX_SPECIAL_CHARACTERS[character]);
+}
+
+const PLACEHOLDER_VALUES = new Set([
+  "organization",
+  "company",
+  "location not provided",
+  "phone not provided",
+  "linkedin not provided",
+  "graduation date not provided",
+  "n/a",
+  "unknown",
+]);
+
+function isPlaceholderValue(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+
+  const trimmed = value.trim().toLowerCase();
+  return trimmed === "" ? false : PLACEHOLDER_VALUES.has(trimmed);
+}
+
+function cleanText(value: string | undefined) {
+  if (!value) {
+    return "";
+  }
+
+  const trimmed = value.trim();
+  return isPlaceholderValue(trimmed) ? "" : trimmed;
 }
 
 function renderBulletList(bullets: string[]) {
@@ -62,22 +93,28 @@ function renderEducation(resume: OptimizedResumeDocument) {
     "\\section*{Education}",
     ...education.flatMap((item) => {
       const lines: string[] = [];
-      const schoolLine = [item.school, item.location].filter(Boolean);
-      const degreeLine = [item.degree, item.graduationDate].filter(Boolean);
+      const schoolLine = [cleanText(item.school), cleanText(item.location)].filter(Boolean);
+      const graduationDate = cleanText(item.graduationDate);
+      const degreeLine = [cleanText(item.degree), graduationDate].filter(Boolean);
 
       if (schoolLine.length) {
+        const school = cleanText(item.school);
+        const location = cleanText(item.location);
         lines.push(
-          item.location
-            ? `\\textbf{${escapeLatex(item.school)}} \\hfill ${escapeLatex(item.location)} \\\\`
-            : `\\textbf{${escapeLatex(item.school)}} \\\\`
+          location
+            ? `\\textbf{${escapeLatex(school)}} \\hfill ${escapeLatex(location)} ${LATEX_LINE_BREAK}`
+            : `\\textbf{${escapeLatex(school)}} ${LATEX_LINE_BREAK}`
         );
       }
 
       if (degreeLine.length) {
+        const degree = cleanText(item.degree);
+        const date = graduationDate;
+        const shouldBreak = Boolean(item.gpa || item.honors?.length || item.coursework?.length);
         lines.push(
-          item.graduationDate
-            ? `${escapeLatex(item.degree)} \\hfill ${escapeLatex(item.graduationDate)}`
-            : escapeLatex(item.degree)
+          date
+            ? `${escapeLatex(degree)} \\hfill ${escapeLatex(date)}${shouldBreak ? ` ${LATEX_LINE_BREAK}` : ""}`
+            : `${escapeLatex(degree)}${shouldBreak ? ` ${LATEX_LINE_BREAK}` : ""}`
         );
       }
 
@@ -109,7 +146,7 @@ function renderSkills(resume: OptimizedResumeDocument) {
     "\\section*{Technical Skills}",
     ...skills.map(
       (section) =>
-        `\\textbf{${escapeLatex(section.label)}}: ${escapeLatex(section.items.join(", "))} \\\\`
+        `\\textbf{${escapeLatex(section.label)}}: ${escapeLatex(section.items.join(", "))} ${LATEX_LINE_BREAK}`
     ),
   ].join("\n");
 }
@@ -150,10 +187,16 @@ function renderExperience(resume: OptimizedResumeDocument, options: ResumeLatexR
   return [
     "\\section*{Experience}",
     ...experience.flatMap((item) => {
+      const title = cleanText(item.title);
+      const organization = cleanText(item.organization);
+      const location = cleanText(item.location);
       const dates = [item.startDate, item.endDate].filter(Boolean).join(" -- ");
-      const heading = `\\textbf{${escapeLatex(item.title)}} | ${escapeLatex(item.organization)}${
-        item.location ? ` \\hfill ${escapeLatex(item.location)}` : ""
-      }`;
+      const headingParts = [title, organization].filter(Boolean);
+      const heading = headingParts.length
+        ? `\\textbf{${escapeLatex(headingParts.join(" | "))}}${location ? ` \\hfill ${escapeLatex(location)}` : ""}`
+        : location
+          ? `\\textbf{${escapeLatex(location)}}`
+          : "";
       return [
         heading,
         dates ? `\\textit{${escapeLatex(dates)}}` : "",
@@ -174,10 +217,10 @@ function renderCertifications(resume: OptimizedResumeDocument) {
     "\\section*{Certifications}",
     ...certifications.map((certification) => {
       if (certification.issuer) {
-        return `${escapeLatex(certification.name)} -- ${escapeLatex(certification.issuer)} \\\\`;
+        return `${escapeLatex(certification.name)} -- ${escapeLatex(certification.issuer)} ${LATEX_LINE_BREAK}`;
       }
 
-      return `${escapeLatex(certification.name)} \\\\`;
+      return `${escapeLatex(certification.name)} ${LATEX_LINE_BREAK}`;
     }),
   ].join("\n");
 }
@@ -193,11 +236,11 @@ export function renderResumeLatex(
   };
 
   const contactItems = [
-    resume.contact.location,
-    resume.contact.phone,
-    resume.contact.email,
-    resume.contact.linkedin,
-    resolvedOptions.includeGithubInHeader ? resume.contact.github : undefined,
+    cleanText(resume.contact.location),
+    cleanText(resume.contact.phone),
+    cleanText(resume.contact.email),
+    cleanText(resume.contact.linkedin),
+    resolvedOptions.includeGithubInHeader ? cleanText(resume.contact.github) : undefined,
   ].filter((item): item is string => Boolean(item));
 
   const sections = [
@@ -215,6 +258,11 @@ export function renderResumeLatex(
     }
   }
 
+  const nameLine = `{\\Large \\textbf{${escapeLatex(resume.contact.name)}}}${LATEX_LINE_BREAK}`;
+  const contactLine = contactItems.length
+    ? `${contactItems.map(escapeLatex).join(" $|$ ")}${LATEX_LINE_BREAK}`
+    : LATEX_LINE_BREAK;
+
   return [
     "\\documentclass[letterpaper,10pt]{article}",
     "\\usepackage[margin=0.55in]{geometry}",
@@ -223,8 +271,8 @@ export function renderResumeLatex(
     "\\setlist[itemize]{leftmargin=*, noitemsep, topsep=2pt}",
     "\\begin{document}",
     "\\begin{center}",
-    `{\\Large \\textbf{${escapeLatex(resume.contact.name)}}}\\\\`,
-    contactItems.map(escapeLatex).join(" $|$ "),
+    nameLine,
+    contactLine,
     "\\end{center}",
     sections.join("\n\n"),
     "\\end{document}",
